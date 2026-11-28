@@ -36,7 +36,10 @@ internal static class SwarmBusToolDispatcher
         "bus_queue" or
         "bus_status" or
         "bus_wait" or
-        "bus_start_work" => true,
+        "bus_start_work" or
+        "bus_sessions" or
+        "bus_project_sync" or
+        "bus_ideas" => true,
         _ => false
     };
 
@@ -77,6 +80,15 @@ internal static class SwarmBusToolDispatcher
             case "bus_start_work":
                 var startRes = await ExecuteStartWorkAsync(store, args, cancellationToken).ConfigureAwait(false);
                 return (startRes, !startRes.Ok);
+
+            case "bus_sessions":
+                return await ExecuteSessionsAsync(store, args, cancellationToken).ConfigureAwait(false);
+
+            case "bus_project_sync":
+                return await ExecuteProjectSyncAsync(store, args, cancellationToken).ConfigureAwait(false);
+
+            case "bus_ideas":
+                return await ExecuteIdeasAsync(store, args, cancellationToken).ConfigureAwait(false);
 
             default:
                 throw new ArgumentException($"Unknown tool: '{toolName}'.", nameof(toolName));
@@ -295,6 +307,181 @@ internal static class SwarmBusToolDispatcher
             MessageLimit: GetOptionalInt32(args, "message_limit", "messageLimit") ?? 20,
             WorkspaceId: GetString(args, "workspace_id", "workspaceId"));
         return store.StartWorkAsync(request, ct);
+    }
+
+    private static async Task<(object Payload, bool IsError)> ExecuteSessionsAsync(
+        SwarmBusStore store,
+        JsonElement args,
+        CancellationToken ct)
+    {
+        var action = (GetString(args, "action") ?? "list").Trim().ToLowerInvariant();
+        var workspaceId = GetString(args, "workspace_id", "workspaceId");
+
+        switch (action)
+        {
+            case "list":
+            {
+                var res = await store.ListSessionsAsync(workspaceId, ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            case "register":
+            case "heartbeat":
+            {
+                var res = await store.UpsertSessionAsync(
+                    new AgentSessionUpsertRequest(
+                        WorkspaceId: workspaceId ?? string.Empty,
+                        Agent: GetString(args, "agent") ?? string.Empty,
+                        SessionId: GetString(args, "session_id", "sessionId"),
+                        Tool: GetString(args, "tool"),
+                        Model: GetString(args, "model"),
+                        State: GetString(args, "state"),
+                        Activity: GetString(args, "activity"),
+                        IssueNumber: GetOptionalInt32(args, "issue_number", "issueNumber", "issue"),
+                        Branch: GetString(args, "branch"),
+                        TtlMinutes: GetOptionalInt32(args, "ttl_minutes", "ttlMinutes")
+                            ?? SwarmBusConstants.DefaultSessionHeartbeatTtlMinutes),
+                    action,
+                    ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            case "unregister":
+            {
+                var res = await store.UnregisterSessionAsync(
+                    GetString(args, "agent") ?? string.Empty,
+                    workspaceId,
+                    ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            default:
+                throw new ArgumentException($"Unsupported bus_sessions action '{action}'. Use: list, register, heartbeat, unregister.");
+        }
+    }
+
+    private static async Task<(object Payload, bool IsError)> ExecuteProjectSyncAsync(
+        SwarmBusStore store,
+        JsonElement args,
+        CancellationToken ct)
+    {
+        var action = (GetString(args, "action") ?? "get").Trim().ToLowerInvariant();
+        var workspaceId = GetString(args, "workspace_id", "workspaceId");
+
+        switch (action)
+        {
+            case "get":
+            {
+                var res = await store.GetProjectSyncAsync(
+                    workspaceId,
+                    GetString(args, "agent"),
+                    ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            case "claim-turn":
+            case "claim_turn":
+            {
+                var res = await store.ClaimProjectTurnAsync(
+                    new ProjectTurnClaimRequest(
+                        WorkspaceId: workspaceId ?? string.Empty,
+                        Agent: GetString(args, "agent") ?? string.Empty,
+                        ActiveGoal: GetString(args, "active_goal", "activeGoal"),
+                        CurrentSlice: GetString(args, "current_slice", "currentSlice"),
+                        Decision: GetString(args, "decision"),
+                        TtlMinutes: GetOptionalInt32(args, "ttl_minutes", "ttlMinutes")
+                            ?? SwarmBusConstants.DefaultLeadTurnTtlMinutes,
+                        SessionId: GetString(args, "session_id", "sessionId"),
+                        Tool: GetString(args, "tool"),
+                        Model: GetString(args, "model"),
+                        State: GetString(args, "state"),
+                        Activity: GetString(args, "activity"),
+                        IssueNumber: GetOptionalInt32(args, "issue_number", "issueNumber", "issue"),
+                        Branch: GetString(args, "branch")),
+                    ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            case "update":
+            {
+                IReadOnlyList<string>? decisions = TryGetProperty(args, out var decisionsElem, "decisions") &&
+                                                   decisionsElem.ValueKind == JsonValueKind.Array
+                    ? GetStringList(args, "decisions")
+                    : null;
+
+                var res = await store.UpdateProjectStateAsync(
+                    new ProjectStateUpdateRequest(
+                        WorkspaceId: workspaceId ?? string.Empty,
+                        Agent: GetString(args, "agent") ?? string.Empty,
+                        ActiveGoal: GetString(args, "active_goal", "activeGoal"),
+                        CurrentSlice: GetString(args, "current_slice", "currentSlice"),
+                        Decision: GetString(args, "decision"),
+                        Decisions: decisions,
+                        ReleaseLead: GetBool(args, false, "release_lead", "releaseLead")),
+                    ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            case "list":
+            {
+                var res = await store.ListProjectStatesAsync(workspaceId, ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            default:
+                throw new ArgumentException($"Unsupported bus_project_sync action '{action}'. Use: get, claim-turn, update, list.");
+        }
+    }
+
+    private static async Task<(object Payload, bool IsError)> ExecuteIdeasAsync(
+        SwarmBusStore store,
+        JsonElement args,
+        CancellationToken ct)
+    {
+        var action = (GetString(args, "action") ?? "list").Trim().ToLowerInvariant();
+        var workspaceId = GetString(args, "workspace_id", "workspaceId");
+
+        switch (action)
+        {
+            case "list":
+            {
+                var res = await store.ListIdeasAsync(workspaceId, GetString(args, "status"), ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            case "add":
+            {
+                var res = await store.AddIdeaAsync(
+                    new ProjectIdeaAddRequest(
+                        WorkspaceId: workspaceId ?? string.Empty,
+                        Title: GetString(args, "title") ?? string.Empty,
+                        CreatedBy: GetString(args, "agent", "created_by", "createdBy") ?? string.Empty,
+                        Details: GetString(args, "details"),
+                        Priority: GetOptionalInt32(args, "priority") ?? 2,
+                        IssueNumber: GetOptionalInt32(args, "issue_number", "issueNumber", "issue")),
+                    ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            case "update":
+            {
+                var id = GetOptionalInt64(args, "id") ?? 0;
+                var res = await store.UpdateIdeaAsync(
+                    new ProjectIdeaUpdateRequest(
+                        Id: id,
+                        WorkspaceId: workspaceId,
+                        Title: GetString(args, "title"),
+                        Details: GetString(args, "details"),
+                        Priority: GetOptionalInt32(args, "priority"),
+                        Status: GetString(args, "status"),
+                        IssueNumber: GetOptionalInt32(args, "issue_number", "issueNumber", "issue")),
+                    ct).ConfigureAwait(false);
+                return (res, !res.Ok);
+            }
+
+            default:
+                throw new ArgumentException($"Unsupported bus_ideas action '{action}'. Use: list, add, update.");
+        }
     }
 
     private static bool TryGetProperty(JsonElement obj, out JsonElement value, params string[] names)

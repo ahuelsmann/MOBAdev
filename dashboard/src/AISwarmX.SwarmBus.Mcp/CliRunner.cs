@@ -165,9 +165,55 @@ internal static class CliRunner
                 CopyOptionalString(flags, args, "workspace-id", "workspace_id");
                 return ("bus_start_work", args);
 
+            case "sessions":
+                args["action"] = GetSingle(flags, "action") ?? "list";
+                CopyOptionalString(flags, args, "agent", "agent");
+                CopyOptionalString(flags, args, "workspace-id", "workspace_id");
+                CopyOptionalString(flags, args, "session-id", "session_id");
+                CopyOptionalString(flags, args, "tool", "tool");
+                CopyOptionalString(flags, args, "model", "model");
+                CopyOptionalString(flags, args, "state", "state");
+                CopyOptionalString(flags, args, "activity", "activity");
+                CopyOptionalString(flags, args, "issue-number", "issue_number", "issue");
+                CopyOptionalString(flags, args, "branch", "branch");
+                CopyOptionalString(flags, args, "ttl-minutes", "ttl_minutes");
+                return ("bus_sessions", args);
+
+            case "project-sync":
+            case "project_sync":
+                args["action"] = GetSingle(flags, "action") ?? "get";
+                CopyOptionalString(flags, args, "agent", "agent");
+                CopyOptionalString(flags, args, "workspace-id", "workspace_id");
+                CopyOptionalString(flags, args, "active-goal", "active_goal");
+                CopyOptionalString(flags, args, "current-slice", "current_slice");
+                CopyOptionalString(flags, args, "decision", "decision");
+                CopyDecisionsArray(flags, args);
+                CopyOptionalBool(flags, args, "release-lead", "release_lead");
+                CopyOptionalString(flags, args, "ttl-minutes", "ttl_minutes");
+                CopyOptionalString(flags, args, "session-id", "session_id");
+                CopyOptionalString(flags, args, "tool", "tool");
+                CopyOptionalString(flags, args, "model", "model");
+                CopyOptionalString(flags, args, "state", "state");
+                CopyOptionalString(flags, args, "activity", "activity");
+                CopyOptionalString(flags, args, "issue-number", "issue_number", "issue");
+                CopyOptionalString(flags, args, "branch", "branch");
+                return ("bus_project_sync", args);
+
+            case "ideas":
+                args["action"] = GetSingle(flags, "action") ?? "list";
+                CopyOptionalString(flags, args, "id", "id");
+                CopyOptionalString(flags, args, "workspace-id", "workspace_id");
+                CopyOptionalString(flags, args, "title", "title");
+                CopyOptionalString(flags, args, "details", "details");
+                CopyOptionalString(flags, args, "priority", "priority");
+                CopyOptionalString(flags, args, "status", "status");
+                CopyOptionalString(flags, args, "issue-number", "issue_number", "issue");
+                CopyOptionalString(flags, args, "agent", "agent", "created-by", "created_by");
+                return ("bus_ideas", args);
+
             default:
                 throw new ArgumentException(
-                    $"Unknown CLI command '{subcommand}'. Expected: send, inbox, ack, locks, review-claim, queue, status, wait, start-work, import-legacy.");
+                    $"Unknown CLI command '{subcommand}'. Expected: send, inbox, ack, locks, review-claim, queue, status, wait, start-work, sessions, project-sync, ideas, import-legacy.");
         }
     }
 
@@ -282,5 +328,50 @@ internal static class CliRunner
         }
 
         target["paths"] = arr;
+    }
+
+    private static void CopyDecisionsArray(Dictionary<string, List<string>> flags, JsonObject target)
+    {
+        if (!flags.TryGetValue("decisions", out var rawList) || rawList.Count == 0)
+        {
+            return;
+        }
+
+        var arr = new JsonArray();
+        foreach (var raw in rawList)
+        {
+            var trimmed = raw.Trim();
+            if (trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(trimmed);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Array)
+                    {
+                        foreach (var elem in doc.RootElement.EnumerateArray())
+                        {
+                            var text = elem.ValueKind == JsonValueKind.String ? elem.GetString() : elem.ToString();
+                            if (!string.IsNullOrWhiteSpace(text))
+                            {
+                                arr.Add(text.Trim());
+                            }
+                        }
+
+                        continue;
+                    }
+                }
+                catch (JsonException)
+                {
+                    // Fall back to literal string entry.
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(trimmed))
+            {
+                arr.Add(trimmed);
+            }
+        }
+
+        target["decisions"] = arr;
     }
 }

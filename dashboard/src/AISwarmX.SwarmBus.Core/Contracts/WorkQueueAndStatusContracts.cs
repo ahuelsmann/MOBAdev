@@ -111,7 +111,10 @@ public sealed record SwarmBusStatusSnapshot(
     int TotalUnread,
     IReadOnlyList<RecipientUnreadCount> UnreadByRecipient,
     IReadOnlyList<PathLockLease> ActiveLocks,
-    IReadOnlyList<SwarmMessageEnvelope> RecentMessages);
+    IReadOnlyList<SwarmMessageEnvelope> RecentMessages,
+    IReadOnlyList<AgentSessionRecord>? Sessions = null,
+    IReadOnlyList<ProjectStateRecord>? Projects = null,
+    int QueuedIdeaCount = 0);
 
 /// <summary>
 /// Summary of a read-only import from a legacy single-repo <c>swarm-bus.db</c> into <c>swarm-bus-v2.db</c>.

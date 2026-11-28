@@ -40,7 +40,7 @@ public sealed class McpServerProcessTests
                 method = "notifications/initialized"
             });
 
-            // 3. tools/list -> 9 tools
+            // 3. tools/list -> 12 tools
             await SendJsonRpcAsync(process.StandardInput, new
             {
                 jsonrpc = "2.0",
@@ -50,7 +50,7 @@ public sealed class McpServerProcessTests
             using (var listDoc = await ReadJsonRpcResponseAsync(process.StandardOutput))
             {
                 var tools = listDoc.RootElement.GetProperty("result").GetProperty("tools");
-                Assert.Equal(9, tools.GetArrayLength());
+                Assert.Equal(12, tools.GetArrayLength());
                 var names = tools.EnumerateArray().Select(t => t.GetProperty("name").GetString()!).ToHashSet(StringComparer.Ordinal);
                 Assert.Contains("bus_send", names);
                 Assert.Contains("bus_inbox", names);
@@ -61,6 +61,9 @@ public sealed class McpServerProcessTests
                 Assert.Contains("bus_status", names);
                 Assert.Contains("bus_wait", names);
                 Assert.Contains("bus_start_work", names);
+                Assert.Contains("bus_sessions", names);
+                Assert.Contains("bus_project_sync", names);
+                Assert.Contains("bus_ideas", names);
             }
 
             // 4. bus_start_work
@@ -172,6 +175,53 @@ public sealed class McpServerProcessTests
             {
                 Assert.False(lostDoc.RootElement.GetProperty("ok").GetBoolean());
                 Assert.Equal("lease_lost", lostDoc.RootElement.GetProperty("reason").GetString());
+            }
+
+            // 9. bus_sessions, bus_project_sync, bus_ideas via MCP stdio
+            using (var sessDoc = await CallToolAsync(process, 12, "bus_sessions", new
+            {
+                action = "register",
+                agent = "codex",
+                workspace_id = "mobaflow",
+                session_id = "thread-mobaflow-1",
+                tool = "codex-cli",
+                model = "gpt-5.4",
+                state = "building",
+                activity = "Implementing #68"
+            }))
+            {
+                Assert.True(sessDoc.RootElement.GetProperty("ok").GetBoolean());
+                Assert.Equal("thread-mobaflow-1", sessDoc.RootElement.GetProperty("session").GetProperty("sessionId").GetString());
+                Assert.Equal("building", sessDoc.RootElement.GetProperty("session").GetProperty("effectiveState").GetString());
+            }
+
+            using (var ideaAddDoc = await CallToolAsync(process, 13, "bus_ideas", new
+            {
+                action = "add",
+                workspace_id = "mobaflow",
+                title = "Add virtual master dashboard card",
+                priority = 1,
+                agent = "claude-opus"
+            }))
+            {
+                Assert.True(ideaAddDoc.RootElement.GetProperty("ok").GetBoolean());
+                Assert.Equal("queued", ideaAddDoc.RootElement.GetProperty("idea").GetProperty("status").GetString());
+            }
+
+            using (var syncDoc = await CallToolAsync(process, 14, "bus_project_sync", new
+            {
+                action = "claim-turn",
+                workspace_id = "mobaflow",
+                agent = "claude-opus",
+                active_goal = "Issue #68 Slice 1",
+                current_slice = "SwarmBus v2.1",
+                decision = "Use SQLite-backed session registry"
+            }))
+            {
+                Assert.True(syncDoc.RootElement.GetProperty("ok").GetBoolean());
+                Assert.Equal("claude-opus", syncDoc.RootElement.GetProperty("projectState").GetProperty("leadAgent").GetString());
+                Assert.Single(syncDoc.RootElement.GetProperty("sessions").EnumerateArray());
+                Assert.Single(syncDoc.RootElement.GetProperty("queuedIdeas").EnumerateArray());
             }
 
             process.StandardInput.Close();
@@ -499,6 +549,111 @@ public sealed class McpServerProcessTests
         var invalidOut = await RunCliAsync(v2DbPath, "--cli", "nonexistent-cmd");
         Assert.Equal(1, invalidOut.ExitCode);
         Assert.Contains("Unknown CLI command", invalidOut.StdErr);
+    }
+
+    [Fact]
+    public async Task CliVirtualMasterSessionsProjectSyncAndIdeasRoundtripWorks()
+    {
+        using var fx = new TempBusFixture();
+        var v2DbPath = Path.Combine(fx.RootPath, "swarm-bus-v2.db");
+
+        var regOut = await RunCliAsync(
+            v2DbPath,
+            "--cli", "sessions",
+            "--action", "register",
+            "--workspace-id", "sentix",
+            "--agent", "codex",
+            "--session-id", "codex-sentix-99",
+            "--tool", "codex-cli",
+            "--model", "gpt-5.4",
+            "--state", "planning",
+            "--activity", "Reviewing Slice 1");
+        Assert.Equal(0, regOut.ExitCode);
+        using (var regDoc = JsonDocument.Parse(regOut.StdOut))
+        {
+            Assert.True(regDoc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("sentix", regDoc.RootElement.GetProperty("workspaceId").GetString());
+            Assert.Equal("codex-sentix-99", regDoc.RootElement.GetProperty("session").GetProperty("sessionId").GetString());
+        }
+
+        var ideaAddOut = await RunCliAsync(
+            v2DbPath,
+            "--cli", "ideas",
+            "--action", "add",
+            "--workspace-id", "sentix",
+            "--title", "Support 3x3 wake routing",
+            "--details", "Resolve per-workspace Codex thread",
+            "--priority", "0",
+            "--agent", "antigravity-gemini");
+        Assert.Equal(0, ideaAddOut.ExitCode);
+        long ideaId;
+        using (var ideaAddDoc = JsonDocument.Parse(ideaAddOut.StdOut))
+        {
+            Assert.True(ideaAddDoc.RootElement.GetProperty("ok").GetBoolean());
+            ideaId = ideaAddDoc.RootElement.GetProperty("idea").GetProperty("id").GetInt64();
+        }
+
+        var ideaUpdateOut = await RunCliAsync(
+            v2DbPath,
+            "--cli", "ideas",
+            "--action", "update",
+            "--id", ideaId.ToString(),
+            "--workspace-id", "sentix",
+            "--status", "promoted",
+            "--issue", "68");
+        Assert.Equal(0, ideaUpdateOut.ExitCode);
+        using (var ideaUpdateDoc = JsonDocument.Parse(ideaUpdateOut.StdOut))
+        {
+            Assert.True(ideaUpdateDoc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("promoted", ideaUpdateDoc.RootElement.GetProperty("idea").GetProperty("status").GetString());
+            Assert.Equal(68, ideaUpdateDoc.RootElement.GetProperty("idea").GetProperty("issueNumber").GetInt32());
+        }
+
+        var wrongWsOut = await RunCliAsync(
+            v2DbPath,
+            "--cli", "ideas",
+            "--action", "update",
+            "--id", ideaId.ToString(),
+            "--workspace-id", "mobaflow",
+            "--status", "done");
+        Assert.Equal(2, wrongWsOut.ExitCode);
+        using (var wrongWsDoc = JsonDocument.Parse(wrongWsOut.StdOut))
+        {
+            Assert.False(wrongWsDoc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("workspace_mismatch", wrongWsDoc.RootElement.GetProperty("reason").GetString());
+        }
+
+        var claimOut = await RunCliAsync(
+            v2DbPath,
+            "--cli", "project-sync",
+            "--action", "claim-turn",
+            "--workspace-id", "sentix",
+            "--agent", "claude-opus",
+            "--active-goal", "Sentix SwarmBus rollout",
+            "--current-slice", "Slice 1",
+            "--decision", "Use agent_sessions for 3x3 routing");
+        Assert.Equal(0, claimOut.ExitCode);
+        using (var claimDoc = JsonDocument.Parse(claimOut.StdOut))
+        {
+            Assert.True(claimDoc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("claude-opus", claimDoc.RootElement.GetProperty("projectState").GetProperty("leadAgent").GetString());
+            Assert.True(claimDoc.RootElement.GetProperty("projectState").GetProperty("isLeadActive").GetBoolean());
+        }
+
+        var updateOut = await RunCliAsync(
+            v2DbPath,
+            "--cli", "project_sync",
+            "--action", "update",
+            "--workspace-id", "sentix",
+            "--agent", "claude-opus",
+            "--release-lead", "true");
+        Assert.Equal(0, updateOut.ExitCode);
+        using (var updateDoc = JsonDocument.Parse(updateOut.StdOut))
+        {
+            Assert.True(updateDoc.RootElement.GetProperty("ok").GetBoolean());
+            Assert.False(updateDoc.RootElement.GetProperty("projectState").GetProperty("isLeadActive").GetBoolean());
+            Assert.Equal("claude-opus", updateDoc.RootElement.GetProperty("previousLeadAgent").GetString());
+        }
     }
 
     [Fact]

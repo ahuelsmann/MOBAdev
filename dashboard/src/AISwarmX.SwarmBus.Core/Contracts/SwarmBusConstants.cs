@@ -21,6 +21,13 @@ public static class SwarmBusConstants
     public const int MinWaitTimeoutMs = 1;
     public const int MaxWaitTimeoutMs = 120_000;
     public const int WaitFallbackPollMs = 250;
+    public const int DefaultSessionHeartbeatTtlMinutes = 15;
+    public const int MinSessionHeartbeatTtlMinutes = 1;
+    public const int MaxSessionHeartbeatTtlMinutes = 1440;
+    public const int DefaultLeadTurnTtlMinutes = 30;
+    public const int MinLeadTurnTtlMinutes = 1;
+    public const int MaxLeadTurnTtlMinutes = 240;
+    public const int MaxProjectDecisions = 20;
 
     public static readonly IReadOnlySet<string> HeadlessRecipients = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
     {
@@ -50,5 +57,22 @@ public static class SwarmBusConstants
         "claimed",
         "done",
         "removed"
+    };
+
+    public static readonly IReadOnlySet<string> ValidSessionStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "idle",
+        "planning",
+        "building",
+        "testing",
+        "reviewing"
+    };
+
+    public static readonly IReadOnlySet<string> ValidIdeaStatuses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        "queued",
+        "promoted",
+        "done",
+        "archived"
     };
 }

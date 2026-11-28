@@ -81,6 +81,9 @@ public sealed partial class SwarmBusStore
     private const string TableReviewClaims = "review_claims";
     private const string TableWorkQueue = "work_queue";
     private const string TableMeta = "meta";
+    private const string TableAgentSessions = "agent_sessions";
+    private const string TableProjectState = "project_state";
+    private const string TableProjectIdeas = "project_ideas";
 
     private const string ParamWorkspaceId = "@workspaceId";
     private const string ParamAllWorkspaces = "@allWorkspaces";
@@ -150,7 +153,8 @@ public sealed partial class SwarmBusStore
         long? ReplyToId,
         string? State,
         string Priority,
-        bool WakeTargetMatches);
+        bool WakeTargetMatches,
+        bool HasExplicitCodexThreadId = false);
 
     private sealed record SendTxResult(
         SendTxMode Mode,
@@ -159,7 +163,8 @@ public sealed partial class SwarmBusStore
         string? Body = null,
         string? WakeState = null,
         bool WakeInProgress = false,
-        string? WakeLeaseToken = null);
+        string? WakeLeaseToken = null,
+        string? ResolvedCodexThreadId = null);
 
     private sealed record MatchedMessageRow(
         long Id,
@@ -551,13 +556,16 @@ public sealed partial class SwarmBusStore
 
         var input = BuildSendTxInput(request);
         var txResult = ExecuteInImmediateTransaction(connection => SendOrDeduplicateInTx(connection, input));
+        var effectiveCodexThreadId = string.IsNullOrWhiteSpace(request.CodexThreadId)
+            ? txResult.ResolvedCodexThreadId
+            : request.CodexThreadId;
 
         return txResult.Mode switch
         {
             SendTxMode.Deduplicated => CreateDeduplicatedSendResult(txResult, input),
             SendTxMode.RetryWake when _wakeDispatcher is null => CreatePendingRetrySendResult(txResult, input),
-            SendTxMode.RetryWake => RunWakeSync(txResult, input, request.CodexThreadId, isRetry: true),
-            _ when input.WakeTargetMatches && _wakeDispatcher is not null => RunWakeSync(txResult, input, request.CodexThreadId, isRetry: false),
+            SendTxMode.RetryWake => RunWakeSync(txResult, input, effectiveCodexThreadId, isRetry: true),
+            _ when input.WakeTargetMatches && _wakeDispatcher is not null => RunWakeSync(txResult, input, effectiveCodexThreadId, isRetry: false),
             _ => CreateInsertedSendResult(txResult, input, [], input.WakeTargetMatches ? WakeStatePending : null)
         };
     }
@@ -571,6 +579,9 @@ public sealed partial class SwarmBusStore
         var txResult = await ExecuteInImmediateTransactionAsync(
             connection => SendOrDeduplicateInTx(connection, input),
             cancellationToken).ConfigureAwait(false);
+        var effectiveCodexThreadId = string.IsNullOrWhiteSpace(request.CodexThreadId)
+            ? txResult.ResolvedCodexThreadId
+            : request.CodexThreadId;
 
         return txResult.Mode switch
         {
@@ -578,12 +589,12 @@ public sealed partial class SwarmBusStore
             SendTxMode.RetryWake => await HandleRetryWakeAsync(
                 txResult,
                 input,
-                request.CodexThreadId,
+                effectiveCodexThreadId,
                 cancellationToken).ConfigureAwait(false),
             _ => await HandleInsertedMessageAsync(
                 txResult,
                 input,
-                request.CodexThreadId,
+                effectiveCodexThreadId,
                 cancellationToken).ConfigureAwait(false)
         };
     }
@@ -1698,7 +1709,8 @@ public sealed partial class SwarmBusStore
             ReplyToId: request.ReplyToId,
             State: state,
             Priority: priority,
-            WakeTargetMatches: wakeTargetMatches);
+            WakeTargetMatches: wakeTargetMatches,
+            HasExplicitCodexThreadId: !string.IsNullOrWhiteSpace(request.CodexThreadId));
     }
 
     private SwarmSendResult RunWakeSync(SendTxResult txResult, SendTxInput input, string? rawCodexThreadId, bool isRetry) =>
@@ -2918,7 +2930,10 @@ public sealed partial class SwarmBusStore
             TotalUnread: ReadTotalUnreadCount(connection, allWorkspaces, normalizedWorkspace),
             UnreadByRecipient: ReadUnreadByRecipient(connection, allWorkspaces, normalizedWorkspace),
             ActiveLocks: allWorkspaces ? ReadAllLocks(connection) : ReadLocksInWorkspace(connection, normalizedWorkspace),
-            RecentMessages: ReadRecentMessages(connection, allWorkspaces, normalizedWorkspace, clampedLimit));
+            RecentMessages: ReadRecentMessages(connection, allWorkspaces, normalizedWorkspace, clampedLimit),
+            Sessions: ReadAgentSessionsInTx(connection, allWorkspaces, normalizedWorkspace, now),
+            Projects: ReadProjectStatesInTx(connection, allWorkspaces, normalizedWorkspace, now),
+            QueuedIdeaCount: CountQueuedIdeasInTx(connection, allWorkspaces, normalizedWorkspace));
     }
 
     private static List<RecipientUnreadCount> ReadUnreadByRecipient(SqliteConnection connection, bool allWorkspaces, string workspaceId)
@@ -3392,12 +3407,18 @@ public sealed partial class SwarmBusStore
 
         AutoAckParentMessageInTx(connection, input, createdAtIso);
 
+        var resolvedCodexThreadId = input.WakeTargetMatches && !input.HasExplicitCodexThreadId
+            ? ResolveRegisteredCodexThreadIdInTx(connection, input.WorkspaceId)
+            : null;
+
         if (input.State is not null)
         {
             var dedup = TryDeduplicateLatestMessageInTx(connection, input, now, wakeExpiresIso);
             if (dedup is not null)
             {
-                return dedup;
+                return dedup.Mode == SendTxMode.RetryWake
+                    ? dedup with { ResolvedCodexThreadId = resolvedCodexThreadId }
+                    : dedup;
             }
         }
 
@@ -3411,7 +3432,8 @@ public sealed partial class SwarmBusStore
             SendTxMode.Inserted,
             id,
             now,
-            WakeLeaseToken: input.WakeTargetMatches ? wakeExpiresIso : null);
+            WakeLeaseToken: input.WakeTargetMatches ? wakeExpiresIso : null,
+            ResolvedCodexThreadId: resolvedCodexThreadId);
     }
 
     private static SendTxResult? TryDeduplicateLatestMessageInTx(
@@ -4006,6 +4028,7 @@ public sealed partial class SwarmBusStore
         EnsureReviewClaimsTable(connection);
         EnsureWorkQueueTable(connection);
         EnsureMetaTable(connection);
+        EnsureVirtualMasterSchema(connection);
     }
 
     private static void EnsureMessagesTable(SqliteConnection connection)
@@ -4161,6 +4184,9 @@ public sealed partial class SwarmBusStore
             TableReviewClaims => "PRAGMA table_info(review_claims);",
             TableWorkQueue => "PRAGMA table_info(work_queue);",
             TableMeta => "PRAGMA table_info(meta);",
+            TableAgentSessions => "PRAGMA table_info(agent_sessions);",
+            TableProjectState => "PRAGMA table_info(project_state);",
+            TableProjectIdeas => "PRAGMA table_info(project_ideas);",
             _ => throw new ArgumentOutOfRangeException(nameof(tableName), $"Unsupported SwarmBus table '{tableName}'.")
         };
 

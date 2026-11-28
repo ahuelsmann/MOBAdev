@@ -154,7 +154,72 @@ internal static class SwarmBusToolCatalog
                 ["message_limit"] = IntProp("Maximum unread inbox messages to return (1..100).", 20),
                 ["workspace_id"] = StringProp("Optional workspace scope (defaults to 'default').")
             },
-            ["agent"])
+            ["agent"]),
+
+        Tool(
+            "bus_sessions",
+            "Register, heartbeat, unregister, or list live 3x3 agent sessions scoped by workspace.",
+            new JsonObject
+            {
+                ["action"] = EnumProp(["list", "register", "heartbeat", "unregister"], "list"),
+                ["agent"] = StringProp("Agent identifier, e.g. claude-opus, codex, antigravity-gemini."),
+                ["workspace_id"] = StringProp("Optional workspace scope (defaults to 'default', or '*' for list)."),
+                ["session_id"] = StringProp("Agent session or Codex thread ID for workspace-scoped wake routing."),
+                ["tool"] = StringProp("Tool/IDE identifier, e.g. claude-code, codex-cli, antigravity."),
+                ["model"] = StringProp("Active model identifier."),
+                ["state"] = EnumProp(["idle", "planning", "building", "testing", "reviewing"], null),
+                ["activity"] = StringProp("Short description of current live activity."),
+                ["issue_number"] = IntProp("Optional associated GitHub issue number."),
+                ["branch"] = StringProp("Optional active git branch name."),
+                ["ttl_minutes"] = IntProp("Heartbeat activity TTL in minutes (1..1440).", 15)
+            },
+            ["action"]),
+
+        Tool(
+            "bus_project_sync",
+            "Synchronize shared workspace project memory, Lead-on-Input turn claims, decisions, sessions, queued ideas, and unread messages.",
+            new JsonObject
+            {
+                ["action"] = EnumProp(["get", "claim-turn", "update", "list"], "get"),
+                ["agent"] = StringProp("Agent claiming a turn, updating state, or filtering unread messages."),
+                ["workspace_id"] = StringProp("Optional workspace scope (defaults to 'default', or '*' for list)."),
+                ["active_goal"] = StringProp("Current high-level workspace goal."),
+                ["current_slice"] = StringProp("Current slice or focus label."),
+                ["decision"] = StringProp("Single architectural/plan decision to append (capped at 20)."),
+                ["decisions"] = new JsonObject
+                {
+                    ["type"] = "array",
+                    ["items"] = new JsonObject { ["type"] = "string" },
+                    ["description"] = "Full replacement decisions list for update (capped at 20)."
+                },
+                ["release_lead"] = BoolProp("When true on update, releases the active lead baton if owned by agent or expired.", false),
+                ["ttl_minutes"] = IntProp("Lead turn lease duration in minutes (1..240).", 30),
+                ["session_id"] = StringProp("Optional session/thread ID to touch on claim-turn."),
+                ["tool"] = StringProp("Optional tool identifier to touch on claim-turn."),
+                ["model"] = StringProp("Optional model identifier to touch on claim-turn."),
+                ["state"] = EnumProp(["idle", "planning", "building", "testing", "reviewing"], null),
+                ["activity"] = StringProp("Optional live activity to touch on claim-turn."),
+                ["issue_number"] = IntProp("Optional associated issue number to touch on claim-turn."),
+                ["branch"] = StringProp("Optional branch name to touch on claim-turn.")
+            },
+            ["action"]),
+
+        Tool(
+            "bus_ideas",
+            "Quick-capture, list, or update/promote workspace backlog ideas without interrupting active flow.",
+            new JsonObject
+            {
+                ["action"] = EnumProp(["list", "add", "update"], "list"),
+                ["id"] = IntProp("Idea ID (required for update)."),
+                ["workspace_id"] = StringProp("Optional workspace scope (defaults to 'default', or '*' for list)."),
+                ["title"] = StringProp("Concise idea title (required for add)."),
+                ["details"] = StringProp("Optional detailed notes or context."),
+                ["priority"] = IntProp("Numeric priority (0=P0 .. 3=P3).", 2),
+                ["status"] = EnumProp(["queued", "promoted", "done", "archived"], null),
+                ["issue_number"] = IntProp("Optional GitHub issue number linked when promoted."),
+                ["agent"] = StringProp("Creating agent identifier (alias: created_by; required for add).")
+            },
+            ["action"])
     ];
 
     private static JsonObject Tool(string name, string description, JsonObject properties, string[] required)
