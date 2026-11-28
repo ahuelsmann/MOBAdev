@@ -281,7 +281,7 @@ public sealed partial class SwarmBusStore
         ExecuteNonQuery(connection, """
             CREATE TABLE IF NOT EXISTS agent_sessions (
               workspace_id TEXT NOT NULL,
-              agent TEXT NOT NULL,
+              agent TEXT NOT NULL COLLATE NOCASE,
               session_id TEXT,
               tool TEXT,
               model TEXT,
@@ -321,22 +321,44 @@ public sealed partial class SwarmBusStore
             """);
     }
 
-    private static string? ResolveRegisteredCodexThreadIdInTx(SqliteConnection connection, string workspaceId)
+    private static string? ResolveRegisteredCodexThreadIdInTx(
+        SqliteConnection connection,
+        string workspaceId,
+        string recipient,
+        DateTimeOffset now)
     {
+        var isBroadcast = string.Equals(recipient, AllRecipient, StringComparison.OrdinalIgnoreCase);
+        var minUpdatedAtUtc = now.AddHours(-SwarmBusConstants.DefaultSessionRegistrationMaxAgeHours);
+
         using var cmd = connection.CreateCommand();
         cmd.CommandText = """
-            SELECT session_id
+            SELECT session_id, updated_at_utc
             FROM agent_sessions
             WHERE workspace_id = @workspaceId
-              AND lower(agent) = 'codex'
+              AND (lower(agent) = lower(@recipient) OR (@isBroadcast = 1 AND lower(agent) = 'codex'))
               AND session_id IS NOT NULL
               AND trim(session_id) <> ''
             ORDER BY updated_at_utc DESC
             LIMIT 1
             """;
         cmd.Parameters.AddWithValue(ParamWorkspaceId, workspaceId);
-        var raw = cmd.ExecuteScalar() as string;
-        return string.IsNullOrWhiteSpace(raw) ? null : raw.Trim();
+        cmd.Parameters.AddWithValue(ParamRecipient, recipient);
+        cmd.Parameters.AddWithValue("@isBroadcast", isBroadcast ? 1 : 0);
+
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        var sessionId = GetNullableString(reader, 0);
+        var updatedAtUtc = GetNullableUtc(reader, 1);
+        if (string.IsNullOrWhiteSpace(sessionId) || !updatedAtUtc.HasValue || updatedAtUtc.Value <= minUpdatedAtUtc)
+        {
+            return null;
+        }
+
+        return sessionId.Trim();
     }
 
     private static ValidatedSessionUpsert ValidateSessionUpsertRequest(AgentSessionUpsertRequest request, string action)
@@ -386,7 +408,7 @@ public sealed partial class SwarmBusStore
         var model = input.Model ?? existing?.Model;
         var issueNumber = input.IssueNumber ?? existing?.IssueNumber;
         var branch = input.Branch ?? existing?.Branch;
-        var state = input.State ?? existing?.State ?? SessionStateIdle;
+        var state = input.State ?? existing?.EffectiveState ?? SessionStateIdle;
 
         string? activity;
         DateTimeOffset? activityExpiresUtc;
@@ -397,7 +419,11 @@ public sealed partial class SwarmBusStore
         }
         else
         {
-            activity = input.Activity ?? existing?.Activity;
+            var inheritedActivity = existing is not null &&
+                                    !string.Equals(existing.EffectiveState, SessionStateIdle, StringComparison.Ordinal)
+                ? existing.Activity
+                : null;
+            activity = input.Activity ?? inheritedActivity;
             activityExpiresUtc = now.AddMinutes(input.TtlMinutes);
         }
 
@@ -656,16 +682,22 @@ public sealed partial class SwarmBusStore
                              !existing.IsLeadActive ||
                              string.Equals(existing.LeadAgent, agent, StringComparison.OrdinalIgnoreCase);
 
-            if (canRelease)
+            if (!canRelease)
             {
-                if (existing is not null && existing.IsLeadActive)
+                return BuildProjectSyncResultInTx(connection, "update", workspaceId, agent, previousLeadAgent: null) with
                 {
-                    previousLeadAgent = existing.LeadAgent;
-                }
-
-                leadAgent = null;
-                leadLeaseExpiresIso = null;
+                    Ok = false,
+                    Reason = "lead_held_by_other"
+                };
             }
+
+            if (existing is not null && existing.IsLeadActive)
+            {
+                previousLeadAgent = existing.LeadAgent;
+            }
+
+            leadAgent = null;
+            leadLeaseExpiresIso = null;
         }
 
         UpsertProjectStateRowInTx(

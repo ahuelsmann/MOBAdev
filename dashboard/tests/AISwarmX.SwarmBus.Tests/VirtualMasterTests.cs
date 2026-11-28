@@ -11,10 +11,12 @@ public sealed class VirtualMasterTests
     public async Task WorkspaceScopedCodexWakeResolvesRegisteredThreadAndAllowsExplicitOverrideAndFallback()
     {
         using var fx = new TempBusFixture();
+        var clock = new TestTimeProvider(new DateTimeOffset(2026, 11, 28, 10, 0, 0, TimeSpan.Zero));
         var dispatched = new List<SwarmWakeContext>();
 
         var store = fx.CreateStore(new SwarmBusStoreOptions
         {
+            TimeProvider = clock,
             WakeDispatcher = (ctx, _) =>
             {
                 dispatched.Add(ctx);
@@ -32,7 +34,7 @@ public sealed class VirtualMasterTests
             Agent: "codex",
             SessionId: "thread-mobaflow",
             Tool: "codex-cli",
-            Model: "gpt-5.4",
+            Model: "gpt-6.2-sol",
             State: "idle"));
 
         await store.UpsertSessionAsync(new AgentSessionUpsertRequest(
@@ -40,7 +42,7 @@ public sealed class VirtualMasterTests
             Agent: "codex",
             SessionId: "thread-sentix",
             Tool: "codex-cli",
-            Model: "gpt-5.4",
+            Model: "gpt-6.2-sol",
             State: "building",
             Activity: "Editing Sentix"));
 
@@ -49,7 +51,7 @@ public sealed class VirtualMasterTests
             Agent: "codex",
             SessionId: "thread-aiswarmx",
             Tool: "codex-cli",
-            Model: "gpt-5.4",
+            Model: "gpt-6.2-sol",
             State: "testing"));
 
         // 1. Registered workspace wakes its own thread (sync + async)
@@ -104,6 +106,18 @@ public sealed class VirtualMasterTests
             WorkspaceId: "unknown-repo"));
         Assert.Null(dispatched[^1].CodexThreadId);
         Assert.Equal("fallback-env-thread", unregisteredWake.WakeResults![0].ThreadId);
+
+        // 4. Stale (>72h) session registration is ignored for wake routing
+        clock.Advance(TimeSpan.FromHours(SwarmBusConstants.DefaultSessionRegistrationMaxAgeHours + 1));
+        var staleWake = await store.SendMessageAsync(new SwarmSendRequest(
+            From: "claude-opus",
+            To: "codex",
+            Topic: "stale-session",
+            Body: "Should fall back when registration is older than 72h",
+            Wake: true,
+            WorkspaceId: "sentix"));
+        Assert.Null(dispatched[^1].CodexThreadId);
+        Assert.Equal("fallback-env-thread", staleWake.WakeResults![0].ThreadId);
     }
 
     [Fact]
@@ -130,7 +144,7 @@ public sealed class VirtualMasterTests
             TtlMinutes: 30,
             SessionId: "claude-sess-1",
             Tool: "claude-code",
-            Model: "claude-opus-4.5",
+            Model: "claude-opus-5-5",
             State: "planning",
             Activity: "Architecting Slice 1",
             IssueNumber: 68,
@@ -162,12 +176,15 @@ public sealed class VirtualMasterTests
         Assert.Equal(["D0: Isolated SQLite tables", "D1: Preserve goal across baton pass"], turn2.ProjectState.Decisions);
         Assert.Single(turn2.UnreadMessages);
 
-        // 3. Another agent cannot release antigravity-gemini's active baton
+        // 3. Another agent cannot release antigravity-gemini's active baton (fails closed without mutating UpdatedBy)
         var foreignRelease = await store.UpdateProjectStateAsync(new ProjectStateUpdateRequest(
             WorkspaceId: "mobadev",
             Agent: "codex",
             ReleaseLead: true));
+        Assert.False(foreignRelease.Ok);
+        Assert.Equal("lead_held_by_other", foreignRelease.Reason);
         Assert.Equal("antigravity-gemini", foreignRelease.ProjectState!.LeadAgent);
+        Assert.Equal("antigravity-gemini", foreignRelease.ProjectState.UpdatedBy);
         Assert.True(foreignRelease.ProjectState.IsLeadActive);
         Assert.Null(foreignRelease.PreviousLeadAgent);
 
@@ -235,7 +252,7 @@ public sealed class VirtualMasterTests
             Agent: "codex",
             SessionId: "thread-abc",
             Tool: "codex-cli",
-            Model: "gpt-5.4",
+            Model: "gpt-6.2-sol",
             State: "building",
             Activity: "Writing VirtualMasterTests",
             IssueNumber: 68,
@@ -260,7 +277,7 @@ public sealed class VirtualMasterTests
         Assert.Equal("heartbeat", hb.Action);
         Assert.Equal("thread-abc", hb.Session!.SessionId);
         Assert.Equal("codex-cli", hb.Session.Tool);
-        Assert.Equal("gpt-5.4", hb.Session.Model);
+        Assert.Equal("gpt-6.2-sol", hb.Session.Model);
         Assert.Equal("testing", hb.Session.State);
         Assert.Equal("testing", hb.Session.EffectiveState);
 
@@ -271,7 +288,28 @@ public sealed class VirtualMasterTests
         Assert.Equal("testing", expired.State);
         Assert.Equal("idle", expired.EffectiveState);
         Assert.Equal("thread-abc", expired.SessionId);
-        Assert.Equal("gpt-5.4", expired.Model);
+        Assert.Equal("gpt-6.2-sol", expired.Model);
+
+        // Stateless heartbeat after TTL expiry stays idle and drops stale activity
+        var statelessHb = await store.UpsertSessionAsync(new AgentSessionUpsertRequest(
+            WorkspaceId: "mobadev",
+            Agent: "codex",
+            TtlMinutes: 10), action: "heartbeat");
+        Assert.Equal("idle", statelessHb.Session!.State);
+        Assert.Equal("idle", statelessHb.Session.EffectiveState);
+        Assert.Null(statelessHb.Session.Activity);
+        Assert.Null(statelessHb.Session.ActivityExpiresUtc);
+        Assert.Equal("thread-abc", statelessHb.Session.SessionId);
+
+        // Re-entering active state without explicit activity does not resurrect expired activity
+        var resumedBuilding = await store.UpsertSessionAsync(new AgentSessionUpsertRequest(
+            WorkspaceId: "mobadev",
+            Agent: "codex",
+            State: "building",
+            TtlMinutes: 10), action: "heartbeat");
+        Assert.Equal("building", resumedBuilding.Session!.State);
+        Assert.Equal("building", resumedBuilding.Session.EffectiveState);
+        Assert.Null(resumedBuilding.Session.Activity);
 
         // Explicit idle state clears activity and activity_expires_utc
         var idled = await store.UpsertSessionAsync(new AgentSessionUpsertRequest(

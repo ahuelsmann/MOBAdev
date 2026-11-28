@@ -109,7 +109,8 @@ public sealed record ProjectSyncResult(
     string? PreviousLeadAgent,
     IReadOnlyList<AgentSessionRecord> Sessions,
     IReadOnlyList<ProjectIdeaItem> QueuedIdeas,
-    IReadOnlyList<SwarmMessageEnvelope> UnreadMessages);
+    IReadOnlyList<SwarmMessageEnvelope> UnreadMessages,
+    string? Reason = null);
 
 /// <summary>
 /// Result returned by <c>ListProjectStates</c>.

@@ -3408,7 +3408,7 @@ public sealed partial class SwarmBusStore
         AutoAckParentMessageInTx(connection, input, createdAtIso);
 
         var resolvedCodexThreadId = input.WakeTargetMatches && !input.HasExplicitCodexThreadId
-            ? ResolveRegisteredCodexThreadIdInTx(connection, input.WorkspaceId)
+            ? ResolveRegisteredCodexThreadIdInTx(connection, input.WorkspaceId, input.Recipient, now)
             : null;
 
         if (input.State is not null)

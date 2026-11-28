@@ -24,6 +24,7 @@ public static class SwarmBusConstants
     public const int DefaultSessionHeartbeatTtlMinutes = 15;
     public const int MinSessionHeartbeatTtlMinutes = 1;
     public const int MaxSessionHeartbeatTtlMinutes = 1440;
+    public const int DefaultSessionRegistrationMaxAgeHours = 72;
     public const int DefaultLeadTurnTtlMinutes = 30;
     public const int MinLeadTurnTtlMinutes = 1;
     public const int MaxLeadTurnTtlMinutes = 240;

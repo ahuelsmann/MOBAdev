@@ -185,7 +185,7 @@ public sealed class McpServerProcessTests
                 workspace_id = "mobaflow",
                 session_id = "thread-mobaflow-1",
                 tool = "codex-cli",
-                model = "gpt-5.4",
+                model = "gpt-6.2-sol",
                 state = "building",
                 activity = "Implementing #68"
             }))
@@ -565,7 +565,7 @@ public sealed class McpServerProcessTests
             "--agent", "codex",
             "--session-id", "codex-sentix-99",
             "--tool", "codex-cli",
-            "--model", "gpt-5.4",
+            "--model", "gpt-6.2-sol",
             "--state", "planning",
             "--activity", "Reviewing Slice 1");
         Assert.Equal(0, regOut.ExitCode);
